@@ -24,8 +24,65 @@ def find_login_sequences(rows, min_failures=3, window_minutes=5):
     Parameters are positive numbers. Use loops, dictionaries, lists, sorted,
     and the imported timedelta. No additional packages are needed.
     """
-    # TODO 1: replace this raise with your implementation.
-    raise NotImplementedError('Complete find_login_sequences')
+
+    # Group failed logins by username, source IP address, and host.
+    failures_by_group = {}
+
+    for row in rows:
+        if row["result"] == "FAIL":
+            key = (row["username"], row["source_ip"], row["host"])
+            failures_by_group.setdefault(key, []).append(row)
+
+    # Check each successful login independently.
+    alerts = []
+
+    for row in rows:
+        if row["result"] != "SUCCESS":
+            continue
+
+        key = (row["username"], row["source_ip"], row["host"])
+        success_time = row["timestamp"]
+        window_start = success_time - timedelta(minutes=window_minutes)
+
+        matching_failures = []
+
+        for failure in failures_by_group.get(key, []):
+            failure_time = failure["timestamp"]
+
+            if window_start <= failure_time < success_time:
+                matching_failures.append(failure)
+
+        # Generate an alert only if the threshold is met.
+        if len(matching_failures) >= min_failures:
+            matching_failures.sort(
+                key=lambda failure: (
+                    failure["timestamp"],
+                    failure["event_id"]
+                )
+            )
+
+            alert = {
+                "username": row["username"],
+                "source_ip": row["source_ip"],
+                "host": row["host"],
+                "session_id": row["session_id"],
+                "success_id": row["event_id"],
+                "success_time": success_time,
+                "failure_ids": [
+                    failure["event_id"] for failure in matching_failures
+                ]
+            }
+
+            alerts.append(alert)
+
+    # Return alerts in chronological order.
+    alerts.sort(key=lambda alert: (
+        alert["success_time"],
+        alert["success_id"]
+    ))
+
+    return alerts
+
 
 def correlate_downloads(alerts, file_rows, followup_minutes=10):
     """Enrich each alert with file activity; return a new list of new dicts.
@@ -44,8 +101,64 @@ def correlate_downloads(alerts, file_rows, followup_minutes=10):
     Do not mutate either input or its nested lists. Do not merge sessions based
     only on a shared account. No hardcoded IDs or outcomes; no extra packages.
     """
-    # TODO 2: replace this raise with your implementation.
-    raise NotImplementedError('Complete correlate_downloads')
+
+    findings = []
+
+    # Evaluate each suspicious login session separately.
+    for alert in alerts:
+        success_time = alert["success_time"]
+        window_end = success_time + timedelta(minutes=followup_minutes)
+
+        matching_downloads = []
+
+        # Examine validated file activity records.
+        for row in file_rows:
+            if (
+                row["username"] == alert["username"]
+                and row["host"] == alert["host"]
+                and row["session_id"] == alert["session_id"]
+                and row["action"] == "DOWNLOAD"
+                and row["result"] == "SUCCESS"
+                and success_time <= row["timestamp"] <= window_end
+            ):
+                matching_downloads.append(row)
+
+        # Sort downloads by timestamp, then event ID.
+        matching_downloads.sort(
+            key=lambda row: (row["timestamp"], row["event_id"])
+        )
+
+        # Create an independent copy of the original alert.
+        finding = {}
+
+        for key, value in alert.items():
+            if isinstance(value, list):
+                finding[key] = value.copy()
+            else:
+                finding[key] = value
+
+        # Enrich the alert with its correlated file activity.
+        finding["download_ids"] = [
+            row["event_id"] for row in matching_downloads
+        ]
+        finding["download_count"] = len(matching_downloads)
+        finding["total_bytes"] = sum(
+            row["bytes"] for row in matching_downloads
+        )
+
+        findings.append(finding)
+
+    # Rank the findings by total downloaded bytes.
+    findings.sort(
+        key=lambda finding: (
+            -finding["total_bytes"],
+            finding["success_time"],
+            finding["success_id"]
+        )
+    )
+
+    return findings
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
